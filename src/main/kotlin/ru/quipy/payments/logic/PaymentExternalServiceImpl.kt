@@ -2,15 +2,19 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import io.micrometer.core.instrument.Counter
+import io.micrometer.core.instrument.MeterRegistry
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.slf4j.LoggerFactory
+import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
+import java.util.concurrent.Semaphore
 
 
 // Advice: always treat time as a Duration
@@ -19,27 +23,51 @@ class PaymentExternalSystemAdapterImpl(
     private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
     private val paymentProviderHostPort: String,
     private val token: String,
+    meterRegistry: MeterRegistry
 ) : PaymentExternalSystemAdapter {
+    private val incomingRegCounted: Counter = Counter.builder("incoming started")
+        .description("incoming started request")
+        .tag("account", properties.accountName)
+        .register(meterRegistry)
+
+    private val incomingFinishedReqCounted: Counter = Counter.builder("incoming finished")
+        .description("incoming finished request")
+        .tag("account", properties.accountName)
+        .register(meterRegistry)
+
+    private val outgoingReqCounted: Counter = Counter.builder("outgoing started")
+        .description("outgoing started request")
+        .tag("account", properties.accountName)
+        .register(meterRegistry)
+
+    private val outgoingFinishedReqCounted: Counter = Counter.builder("outgoing finished")
+        .description("outgoing finished request")
+        .tag("account", properties.accountName)
+        .register(meterRegistry)
 
     companion object {
         val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
 
-        val emptyBody = RequestBody.create(null, ByteArray(0))
+        val emptyBody = ByteArray(0).toRequestBody(null)
         val mapper = ObjectMapper().registerKotlinModule()
     }
 
     private val serviceName = properties.serviceName
     private val accountName = properties.accountName
-    private val requestAverageProcessingTime = properties.averageProcessingTime
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
     private val client = OkHttpClient.Builder().build()
 
+    private val rateLimiter = SlidingWindowRateLimiter(rate = rateLimitPerSec.toLong() - 1, window = Duration.ofSeconds(1))
+    private val semaphore = Semaphore(parallelRequests)
+
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
 
         val transactionId = UUID.randomUUID()
+
+        incomingRegCounted.increment()
 
         // Вне зависимости от исхода оплаты важно отметить что она была отправлена.
         // Это требуется сделать ВО ВСЕХ СЛУЧАЯХ, поскольку эта информация используется сервисом тестирования.
@@ -49,11 +77,16 @@ class PaymentExternalSystemAdapterImpl(
 
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
 
+        semaphore.acquire()
+
         try {
+            outgoingReqCounted.increment()
             val request = Request.Builder().run {
                 url("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
                 post(emptyBody)
             }.build()
+
+            rateLimiter.tickBlocking()
 
             client.newCall(request).execute().use { response ->
                 val body = try {
@@ -88,6 +121,10 @@ class PaymentExternalSystemAdapterImpl(
                     }
                 }
             }
+        } finally {
+            semaphore.release()
+            outgoingFinishedReqCounted.increment()
+            incomingFinishedReqCounted.increment()
         }
     }
 
@@ -99,4 +136,4 @@ class PaymentExternalSystemAdapterImpl(
 
 }
 
-public fun now() = System.currentTimeMillis()
+fun now() = System.currentTimeMillis()
