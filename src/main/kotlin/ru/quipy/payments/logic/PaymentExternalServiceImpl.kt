@@ -9,12 +9,15 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.slf4j.LoggerFactory
 import ru.quipy.common.utils.SlidingWindowRateLimiter
+import ru.quipy.common.utils.TokenBucketRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
+import kotlin.math.ceil
 
 
 // Advice: always treat time as a Duration
@@ -59,7 +62,12 @@ class PaymentExternalSystemAdapterImpl(
 
     private val client = OkHttpClient.Builder().build()
 
-    private val rateLimiter = SlidingWindowRateLimiter(rate = rateLimitPerSec.toLong() - 1, window = Duration.ofSeconds(1))
+    private val rateLimiter = TokenBucketRateLimiter(
+        rate = 16,
+        bucketMaxCapacity = 16,
+        window = 1,
+        timeUnit = TimeUnit.SECONDS
+    )
     private val semaphore = Semaphore(parallelRequests)
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
@@ -86,7 +94,9 @@ class PaymentExternalSystemAdapterImpl(
                 post(emptyBody)
             }.build()
 
-            rateLimiter.tickBlocking()
+            while (!rateLimiter.tick()) {
+                Thread.sleep(10)
+            }
 
             client.newCall(request).execute().use { response ->
                 val body = try {

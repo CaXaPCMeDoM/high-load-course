@@ -11,6 +11,10 @@ import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import org.springframework.http.HttpHeaders
+import ru.quipy.common.utils.CompositeRateLimiter
+import ru.quipy.common.utils.LeakingBucketRateLimiter
+import ru.quipy.common.utils.TokenBucketRateLimiter
+import java.time.Duration
 import java.util.*
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
@@ -29,18 +33,43 @@ class OrderPayer {
     @Autowired
     private lateinit var paymentService: PaymentService
 
+    private var ingressRate = 11
+
     private val paymentExecutor = ThreadPoolExecutor(
         16,
         16,
         0L,
         TimeUnit.MILLISECONDS,
-        LinkedBlockingQueue(11),
+        LinkedBlockingQueue(250),
         NamedThreadFactory("payment-submission-executor"),
         CallerBlockingRejectedExecutionHandler()
     )
 
+    private val compositeRateLimiter = CompositeRateLimiter(
+        TokenBucketRateLimiter(
+            rate = ingressRate,
+            bucketMaxCapacity = ingressRate * 4,
+            window = 1,
+            timeUnit = TimeUnit.SECONDS
+        ), LeakingBucketRateLimiter(
+            rate = ingressRate.toLong(),
+            window = Duration.ofSeconds(1),
+            bucketSize = 16
+        )
+    )
+
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         val createdAt = System.currentTimeMillis()
+
+        if (!compositeRateLimiter.tick()) {
+            throw HttpClientErrorException.create(
+                HttpStatus.TOO_MANY_REQUESTS,
+                "Payment executor queue is full",
+                HttpHeaders.EMPTY,
+                ByteArray(0),
+                null
+            )
+        }
 
         if (paymentExecutor.queue.remainingCapacity() == 0) {
             throw HttpClientErrorException.create(
