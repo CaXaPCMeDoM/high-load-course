@@ -95,7 +95,7 @@ class PaymentExternalSystemAdapterImpl(
             }.build()
 
             while (!rateLimiter.tick()) {
-                Thread.sleep(10)
+                Thread.sleep(100)
             }
 
             client.newCall(request).execute().use { response ->
