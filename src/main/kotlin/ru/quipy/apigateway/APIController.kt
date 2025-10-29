@@ -7,6 +7,7 @@ import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
 import org.springframework.web.client.HttpClientErrorException
+import ru.quipy.common.utils.LeakingBucketRateLimiter
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.orders.repository.OrderRepository
 import ru.quipy.payments.logic.OrderPayer
@@ -60,8 +61,14 @@ class APIController {
         PAID,
     }
 
+    val rateLimiter = LeakingBucketRateLimiter(11, Duration.ofSeconds(1), 275)
+
     @PostMapping("/orders/{orderId}/payment")
     fun payOrder(@PathVariable orderId: UUID, @RequestParam deadline: Long): ResponseEntity<PaymentSubmissionDto> {
+        if (!rateLimiter.tick()) {
+            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).header("Retry-After", 1000.toString()).build()
+        }
+
         val paymentId = UUID.randomUUID()
         val timestamp = System.currentTimeMillis() + 1000
 

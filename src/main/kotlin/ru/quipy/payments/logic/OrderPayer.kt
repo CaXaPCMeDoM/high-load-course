@@ -33,35 +33,25 @@ class OrderPayer {
     @Autowired
     private lateinit var paymentService: PaymentService
 
-    private var ingressRate = 11
-
     private val paymentExecutor = ThreadPoolExecutor(
         16,
         16,
         0L,
         TimeUnit.MILLISECONDS,
-        LinkedBlockingQueue(11),
+        LinkedBlockingQueue(8000),
         NamedThreadFactory("payment-submission-executor"),
         CallerBlockingRejectedExecutionHandler()
     )
 
-    private val compositeRateLimiter = CompositeRateLimiter(
-        TokenBucketRateLimiter(
-            rate = ingressRate,
-            bucketMaxCapacity = ingressRate * 4,
-            window = 1,
-            timeUnit = TimeUnit.SECONDS
-        ), LeakingBucketRateLimiter(
-            rate = ingressRate.toLong(),
-            window = Duration.ofSeconds(1),
-            bucketSize = 16
-        )
-    )
+    /*val rateLimiter = LeakingBucketRateLimiter(
+        rate = 11,
+        window = Duration.ofMillis()
+    )*/
 
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         val createdAt = System.currentTimeMillis()
 
-        if (!compositeRateLimiter.tick()) {
+        /*if (!compositeRateLimiter.tick()) {
             throw HttpClientErrorException.create(
                 HttpStatus.TOO_MANY_REQUESTS,
                 "Payment executor queue is full",
@@ -79,7 +69,7 @@ class OrderPayer {
                 ByteArray(0),
                 null
             )
-        }
+        }*/
 
         paymentExecutor.submit {
             val createdEvent = paymentESService.create {

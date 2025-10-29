@@ -62,12 +62,7 @@ class PaymentExternalSystemAdapterImpl(
 
     private val client = OkHttpClient.Builder().build()
 
-    private val rateLimiter = TokenBucketRateLimiter(
-        rate = 16,
-        bucketMaxCapacity = 16,
-        window = 1,
-        timeUnit = TimeUnit.SECONDS
-    )
+    private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
     private val semaphore = Semaphore(parallelRequests)
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
@@ -94,9 +89,7 @@ class PaymentExternalSystemAdapterImpl(
                 post(emptyBody)
             }.build()
 
-            while (!rateLimiter.tick()) {
-                Thread.sleep(100)
-            }
+            rateLimiter.tickBlocking()
 
             client.newCall(request).execute().use { response ->
                 val body = try {
