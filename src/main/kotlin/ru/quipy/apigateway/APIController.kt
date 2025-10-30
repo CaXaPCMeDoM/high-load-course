@@ -63,10 +63,6 @@ class APIController {
 
     @PostMapping("/orders/{orderId}/payment")
     fun payOrder(@PathVariable orderId: UUID, @RequestParam deadline: Long): ResponseEntity<PaymentSubmissionDto> {
-        /*if (!rateLimiter.tick()) {
-            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).header("Retry-After", 30.toString()).build()
-        }*/
-
         val paymentId = UUID.randomUUID()
         val timestamp = System.currentTimeMillis() + 950
 
