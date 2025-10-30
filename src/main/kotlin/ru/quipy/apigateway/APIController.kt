@@ -61,16 +61,14 @@ class APIController {
         PAID,
     }
 
-    val rateLimiter = LeakingBucketRateLimiter(11, Duration.ofSeconds(1), 275)
-
     @PostMapping("/orders/{orderId}/payment")
     fun payOrder(@PathVariable orderId: UUID, @RequestParam deadline: Long): ResponseEntity<PaymentSubmissionDto> {
-        if (!rateLimiter.tick()) {
-            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).header("Retry-After", 1000.toString()).build()
-        }
+        /*if (!rateLimiter.tick()) {
+            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).header("Retry-After", 30.toString()).build()
+        }*/
 
         val paymentId = UUID.randomUUID()
-        val timestamp = System.currentTimeMillis() + 1000
+        val timestamp = System.currentTimeMillis() + 950
 
         val order = orderRepository.findById(orderId)?.let {
             orderRepository.save(it.copy(status = OrderStatus.PAYMENT_IN_PROGRESS))
@@ -81,6 +79,7 @@ class APIController {
             val createdAt = orderPayer.processPayment(orderId, order.price, paymentId, deadline)
             return ResponseEntity.ok(PaymentSubmissionDto(createdAt, paymentId))
         } catch (e: HttpClientErrorException.TooManyRequests) {
+            // maybe 30 seconds?
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).header("Retry-After", timestamp.toString()).build()
         }
     }
