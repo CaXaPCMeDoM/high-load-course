@@ -3,6 +3,7 @@ package ru.quipy.payments.logic
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import io.micrometer.core.instrument.Counter
+import io.micrometer.core.instrument.DistributionSummary
 import io.micrometer.core.instrument.MeterRegistry
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -48,11 +49,25 @@ class PaymentExternalSystemAdapterImpl(
         .tag("account", properties.accountName)
         .register(meterRegistry)
 
+    private val retryCounter: Counter = Counter.builder("outgoing_request_retries")
+        .description("Number of retries for outgoing requests")
+        .tag("account", properties.accountName)
+        .register(meterRegistry)
+
+    private val outgoingRequestProcessingTime = DistributionSummary
+        .builder("outgoing_request_processing_time")
+        .description("Outgoing request latency")
+        .publishPercentiles(0.5, 0.75, 0.9, 0.95, 0.99)
+        .publishPercentileHistogram()
+        .register(meterRegistry)
+
     companion object {
         val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
 
         val emptyBody = ByteArray(0).toRequestBody(null)
         val mapper = ObjectMapper().registerKotlinModule()
+
+        const val MAX_RETRIES: Int = 3
     }
 
     private val serviceName = properties.serviceName
@@ -60,13 +75,19 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
-    private val client = OkHttpClient.Builder().build()
+    // IF the request is not completed in 1.5 seconds, then we throw the IOException
+    private val client = OkHttpClient.Builder()
+        .callTimeout(1500, TimeUnit.MILLISECONDS)
+        .build()
 
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
     private val semaphore = Semaphore(parallelRequests)
     private val requestAverageProcessingTime = properties.averageProcessingTime
     private val retryAfterMillis: Long =
         (((requestAverageProcessingTime.toMillis().toDouble()) / 2.0) * (rateLimitPerSec / 7.0)).toLong()
+
+    fun recordRetry() = retryCounter.increment()
+    fun recordOutgoingRequest(processingTime: Long) = outgoingRequestProcessingTime.record(processingTime.toDouble())
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
@@ -87,7 +108,8 @@ class PaymentExternalSystemAdapterImpl(
 
         var attempt = 1
 
-        while (attempt <= 3) {
+        while (attempt <= MAX_RETRIES) {
+            val startTime = now()
             try {
                 outgoingReqCounted.increment()
                 val request = Request.Builder().run {
@@ -113,31 +135,44 @@ class PaymentExternalSystemAdapterImpl(
                         it.logProcessing(body.result, now(), transactionId, reason = body.message)
                     }
 
+                    val processingTime = now() - startTime
+                    recordOutgoingRequest(processingTime)
+
                     if (body.result) {
                         return
-                    } else if (attempt < 3) {
+                    } else if (attempt < MAX_RETRIES) {
                         logger.warn("[$accountName] Retry #$attempt for payment $paymentId after ${retryAfterMillis}ms")
+                        recordRetry()
                         Thread.sleep(retryAfterMillis)
                     }
                 }
             } catch (e: Exception) {
                 when (e) {
                     is SocketTimeoutException -> {
-                        logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
+                        logger.error("[$accountName] Payment socket timeout for txId: $transactionId, payment: $paymentId", e)
                         paymentESService.update(paymentId) {
-                            it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
+                            it.logProcessing(false, now(), transactionId, reason = "Socket timeout.")
+                        }
+                    }
+
+                    is java.io.InterruptedIOException -> {
+                        logger.error("[$accountName] Payment interrupted (timeout/cancel) for txId: $transactionId, payment: $paymentId", e)
+                        paymentESService.update(paymentId) {
+                            it.logProcessing(false, now(), transactionId, reason = "Interrupted I/O (timeout or cancel).")
                         }
                     }
 
                     else -> {
                         logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
-
                         paymentESService.update(paymentId) {
                             it.logProcessing(false, now(), transactionId, reason = e.message)
                         }
                     }
                 }
-                if (attempt < 3) {
+
+                if (attempt < MAX_RETRIES) {
+                    logger.warn("[$accountName] Retry #$attempt for payment $paymentId after ${retryAfterMillis}ms")
+                    recordRetry()
                     Thread.sleep(retryAfterMillis)
                 }
 
