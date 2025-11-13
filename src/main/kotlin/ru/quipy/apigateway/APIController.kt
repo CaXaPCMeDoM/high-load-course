@@ -18,7 +18,6 @@ import java.util.concurrent.LinkedBlockingQueue
 @RestController
 class APIController {
     val logger: Logger = LoggerFactory.getLogger(APIController::class.java)
-    val queue = LinkedBlockingQueue<Any>(200)
 
     @Autowired
     private lateinit var orderRepository: OrderRepository
