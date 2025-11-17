@@ -34,16 +34,16 @@ class OrderPayer {
     private lateinit var paymentService: PaymentService
 
     private val paymentExecutor = ThreadPoolExecutor(
-        2000,
-        2000,
+        50,
+        50,
         0L,
         TimeUnit.MILLISECONDS,
-        LinkedBlockingQueue(20000),
+        LinkedBlockingQueue(8_000),
         NamedThreadFactory("payment-submission-executor"),
         CallerBlockingRejectedExecutionHandler()
     )
 
-    val rateLimiter = TokenBucketRateLimiter(40, 40, 1, TimeUnit.SECONDS)
+    val rateLimiter = TokenBucketRateLimiter(6, 11, 1, TimeUnit.SECONDS)
 
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         if (paymentExecutor.queue.remainingCapacity() == 0) {

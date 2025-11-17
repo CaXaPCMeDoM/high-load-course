@@ -77,7 +77,7 @@ class PaymentExternalSystemAdapterImpl(
 
     // IF the request is not completed in 1.5 seconds, then we throw the IOException
     private val client = OkHttpClient.Builder()
-        //.callTimeout(1500, TimeUnit.MILLISECONDS)
+        .callTimeout(1500, TimeUnit.MILLISECONDS)
         .build()
 
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
