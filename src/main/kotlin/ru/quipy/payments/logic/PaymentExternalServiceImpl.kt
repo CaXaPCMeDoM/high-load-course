@@ -18,7 +18,8 @@ import java.time.Duration
 import java.util.*
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
-import kotlin.math.ceil
+import okhttp3.ConnectionPool
+import okhttp3.Protocol
 
 
 // Advice: always treat time as a Duration
@@ -77,7 +78,15 @@ class PaymentExternalSystemAdapterImpl(
 
     // IF the request is not completed in 1.5 seconds, then we throw the IOException
     private val client = OkHttpClient.Builder()
-        .callTimeout(1500, TimeUnit.MILLISECONDS)
+        .callTimeout(Duration.ofMillis(15000))
+        .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
+        .dispatcher(
+            okhttp3.Dispatcher().apply {
+                maxRequests = 10000
+                maxRequestsPerHost = 10000
+            }
+        )
+        .connectionPool(ConnectionPool(10000, 5, TimeUnit.MINUTES))
         .build()
 
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
