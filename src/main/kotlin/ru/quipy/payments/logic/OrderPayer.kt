@@ -17,6 +17,7 @@ import ru.quipy.common.utils.TokenBucketRateLimiter
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 
@@ -33,17 +34,19 @@ class OrderPayer {
     @Autowired
     private lateinit var paymentService: PaymentService
 
-    private val paymentExecutor = ThreadPoolExecutor(
+    private val paymentExecutor = object : ScheduledThreadPoolExecutor(
         5000,
-        5000,
-        0L,
-        TimeUnit.MILLISECONDS,
-        LinkedBlockingQueue(5000),
-        NamedThreadFactory("payment-submission-executor"),
-        CallerBlockingRejectedExecutionHandler()
-    )
+        NamedThreadFactory("payment-submission-executor")
+    ) {
+        init {
+            setMaximumPoolSize(5000)
+            setKeepAliveTime(0L, TimeUnit.MILLISECONDS)
+            setRejectedExecutionHandler(CallerBlockingRejectedExecutionHandler())
+            removeOnCancelPolicy = true
+        }
+    }
 
-    val rateLimiter = TokenBucketRateLimiter(6, 11, 1, TimeUnit.SECONDS)
+    val rateLimiter = TokenBucketRateLimiter(1100, 5000, 1, TimeUnit.SECONDS)
 
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         if (paymentExecutor.queue.remainingCapacity() == 0) {
@@ -78,8 +81,75 @@ class OrderPayer {
             }
             logger.trace("Payment ${createdEvent.paymentId} for order $orderId created.")
 
-            paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
+            retryAsync(paymentId, amount, createdAt, deadline, attempt = 1)
         }
         return createdAt
+    }
+
+    private fun retryAsync(
+        paymentId: UUID,
+        amount: Int,
+        createdAt: Long,
+        deadline: Long,
+        attempt: Int
+    ) {
+        val now = System.currentTimeMillis()
+        val timeLeft = deadline - now
+
+        if (timeLeft <= 0) {
+            logger.warn("Payment $paymentId attempt #$attempt aborted: deadline exceeded")
+            return
+        }
+
+        val paymentRequest = paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
+        val start = System.currentTimeMillis()
+
+        paymentRequest
+            .orTimeout(timeLeft, TimeUnit.MILLISECONDS)
+            .whenCompleteAsync({ success, error ->
+                System.currentTimeMillis() - start
+
+                when {
+                    error != null -> {
+                        logger.warn(
+                            "Payment $paymentId attempt #$attempt failed: ${error.message}, " +
+                                    "timeLeft=${deadline - System.currentTimeMillis()}ms"
+                        )
+                        scheduleRetry(paymentId, amount, createdAt, deadline, attempt)
+                    }
+
+                    success == true -> {
+                        logger.info("Payment $paymentId attempt #$attempt succeeded")
+                    }
+
+                    else -> {
+                        logger.info("Payment $paymentId attempt #$attempt returned failure")
+                        scheduleRetry(paymentId, amount, createdAt, deadline, attempt)
+                    }
+                }
+            }, paymentExecutor)
+    }
+
+    private fun scheduleRetry(
+        paymentId: UUID,
+        amount: Int,
+        createdAt: Long,
+        deadline: Long,
+        attempt: Int
+    ) {
+        val now = System.currentTimeMillis()
+        val timeLeft = deadline - now
+
+        if (timeLeft <= 0) {
+            return
+        }
+
+        paymentExecutor.schedule(
+            {
+                retryAsync(paymentId, amount, createdAt, deadline, attempt + 1)
+            },
+            100L,
+            TimeUnit.MILLISECONDS
+        )
     }
 }
