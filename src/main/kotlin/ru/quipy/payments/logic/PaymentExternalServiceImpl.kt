@@ -5,6 +5,9 @@ import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import io.micrometer.core.instrument.Counter
 import io.micrometer.core.instrument.DistributionSummary
 import io.micrometer.core.instrument.MeterRegistry
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.OkHttpClient
@@ -182,8 +185,10 @@ class PaymentExternalSystemAdapterImpl(
 
                             logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
 
-                            paymentESService.update(paymentId) {
-                                it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                            CoroutineScope(Dispatchers.IO).launch {
+                                paymentESService.update(paymentId) {
+                                    it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                                }
                             }
 
                             val processingTime = now() - startTime
