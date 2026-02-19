@@ -42,7 +42,8 @@ class PaymentExternalSystemAdapterImpl(
     private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
     private val paymentProviderHostPort: String,
     private val token: String,
-    meterRegistry: MeterRegistry
+    private val coroutineScope: CoroutineScope,
+    meterRegistry: MeterRegistry,
 ) : PaymentExternalSystemAdapter {
     private val incomingRegCounted: Counter = Counter.builder("incoming started")
         .description("incoming started request")
@@ -105,7 +106,7 @@ class PaymentExternalSystemAdapterImpl(
     // IF the request is not completed in 1.5 seconds, then we throw the IOException
     private val client = OkHttpClient.Builder()
         .readTimeout(Duration.ofSeconds(30))
-        .dispatcher( Dispatcher(Executors.newFixedThreadPool(10000)).apply {
+        .dispatcher(Dispatcher(Executors.newFixedThreadPool(10000)).apply {
             maxRequests = parallelRequests
             maxRequestsPerHost = parallelRequests
         })
@@ -185,7 +186,7 @@ class PaymentExternalSystemAdapterImpl(
 
                             logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
 
-                            CoroutineScope(Dispatchers.IO).launch {
+                            coroutineScope.launch {
                                 paymentESService.update(paymentId) {
                                     it.logProcessing(body.result, now(), transactionId, reason = body.message)
                                 }
@@ -210,21 +211,35 @@ class PaymentExternalSystemAdapterImpl(
                     try {
                         when (e) {
                             is SocketTimeoutException -> {
-                                logger.error("[$accountName] Payment socket timeout for txId: $transactionId, payment: $paymentId", e)
+                                logger.error(
+                                    "[$accountName] Payment socket timeout for txId: $transactionId, payment: $paymentId",
+                                    e
+                                )
                                 paymentESService.update(paymentId) {
                                     it.logProcessing(false, now(), transactionId, reason = "Socket timeout.")
                                 }
                             }
 
                             is java.io.InterruptedIOException -> {
-                                logger.error("[$accountName] Payment interrupted (timeout/cancel) for txId: $transactionId, payment: $paymentId", e)
+                                logger.error(
+                                    "[$accountName] Payment interrupted (timeout/cancel) for txId: $transactionId, payment: $paymentId",
+                                    e
+                                )
                                 paymentESService.update(paymentId) {
-                                    it.logProcessing(false, now(), transactionId, reason = "Interrupted I/O (timeout or cancel).")
+                                    it.logProcessing(
+                                        false,
+                                        now(),
+                                        transactionId,
+                                        reason = "Interrupted I/O (timeout or cancel)."
+                                    )
                                 }
                             }
 
                             else -> {
-                                logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
+                                logger.error(
+                                    "[$accountName] Payment failed for txId: $transactionId, payment: $paymentId",
+                                    e
+                                )
                                 paymentESService.update(paymentId) {
                                     it.logProcessing(false, now(), transactionId, reason = e.message)
                                 }

@@ -1,5 +1,6 @@
 package ru.quipy.payments.logic
 
+import kotlinx.coroutines.CoroutineScope
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
@@ -19,10 +20,13 @@ import java.util.*
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.ThreadPoolExecutor
+import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
 
 @Service
-class OrderPayer {
+class OrderPayer(
+    private val coroutineScope: CoroutineScope
+) {
 
     companion object {
         val logger: Logger = LoggerFactory.getLogger(OrderPayer::class.java)
@@ -71,7 +75,7 @@ class OrderPayer {
 
         val createdAt = System.currentTimeMillis()
 
-        paymentExecutor.submit {
+        coroutineScope.launch {
             val createdEvent = paymentESService.create {
                 it.create(
                     paymentId,
