@@ -104,7 +104,7 @@ class PaymentExternalSystemAdapterImpl(
 
     // IF the request is not completed in 1.5 seconds, then we throw the IOException
     private val client = OkHttpClient.Builder()
-        .readTimeout(Duration.ofSeconds(30))
+        .readTimeout(Duration.ofMillis(1000L))
         .dispatcher( Dispatcher(Executors.newFixedThreadPool(10000)).apply {
             maxRequests = parallelRequests
             maxRequestsPerHost = parallelRequests
