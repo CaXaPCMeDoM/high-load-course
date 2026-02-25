@@ -91,11 +91,11 @@ class PaymentExternalSystemAdapterImpl(
     private val parallelRequests = properties.parallelRequests
 
     private val paymentExecutor = object : ScheduledThreadPoolExecutor(
-        5000,
+        100,
         NamedThreadFactory("payment-submission-executor")
     ) {
         init {
-            setMaximumPoolSize(5000)
+            setMaximumPoolSize(100)
             setKeepAliveTime(0L, TimeUnit.MILLISECONDS)
             setRejectedExecutionHandler(CallerBlockingRejectedExecutionHandler())
             removeOnCancelPolicy = true
@@ -105,7 +105,7 @@ class PaymentExternalSystemAdapterImpl(
     // IF the request is not completed in 1.5 seconds, then we throw the IOException
     private val client = OkHttpClient.Builder()
         .readTimeout(Duration.ofMillis(1000L))
-        .dispatcher( Dispatcher(Executors.newFixedThreadPool(10000)).apply {
+        .dispatcher( Dispatcher(Executors.newFixedThreadPool(100)).apply {
             maxRequests = parallelRequests
             maxRequestsPerHost = parallelRequests
         })
