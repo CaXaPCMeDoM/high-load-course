@@ -109,7 +109,7 @@ class PaymentExternalSystemAdapterImpl(
         parallelRequests,
         parallelRequests,
         0L, TimeUnit.MILLISECONDS,
-        LinkedBlockingQueue(parallelRequests * 2),
+        LinkedBlockingQueue(4000),
         NamedThreadFactory("payment-submission-executor"),
         rejectedCountingPolicy
     ).apply {
@@ -120,7 +120,7 @@ class PaymentExternalSystemAdapterImpl(
         parallelRequests,
         parallelRequests,
         0L, TimeUnit.MILLISECONDS,
-        LinkedBlockingQueue(parallelRequests * 2),
+        LinkedBlockingQueue(4000),
         NamedThreadFactory("okhttp-dispatcher-executor"),
         rejectedCountingPolicy
     )
