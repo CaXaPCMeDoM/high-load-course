@@ -22,7 +22,7 @@ class OrderPayer {
 
     companion object {
         val logger: Logger = LoggerFactory.getLogger(OrderPayer::class.java)
-        private const val QUEUE_SIZE_MULTIPLIER = 2
+        private const val QUEUE_SIZE_MULTIPLIER = 11
         private const val MAX_SCHEDULED_TASKS = 4000
         private const val CORE_POOL_SIZE = 100
         private const val MAX_POOL_SIZE = 100
