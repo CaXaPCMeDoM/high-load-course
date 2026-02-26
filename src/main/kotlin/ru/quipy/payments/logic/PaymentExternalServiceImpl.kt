@@ -33,7 +33,10 @@ import java.io.IOException
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.RejectedExecutionHandler
 import java.util.concurrent.ScheduledThreadPoolExecutor
+import java.util.concurrent.ThreadPoolExecutor
 
 
 // Advice: always treat time as a Duration
@@ -76,6 +79,18 @@ class PaymentExternalSystemAdapterImpl(
         .publishPercentileHistogram()
         .register(meterRegistry)
 
+    private val rejectedTasksCounter = Counter.builder("executor.tasks.rejected")
+        .description("Number of tasks rejected due to queue overflow")
+        .tag("account", properties.accountName)
+        .register(meterRegistry)
+
+    private val rejectedCountingPolicy = RejectedExecutionHandler { r, executor ->
+        rejectedTasksCounter.increment()
+        if (!executor.isShutdown) {
+            r.run()
+        }
+    }
+
     companion object {
         val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
 
@@ -90,27 +105,40 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
-    private val paymentExecutor = object : ScheduledThreadPoolExecutor(
-        100,
-        NamedThreadFactory("payment-submission-executor")
-    ) {
-        init {
-            setMaximumPoolSize(100)
-            setKeepAliveTime(0L, TimeUnit.MILLISECONDS)
-            setRejectedExecutionHandler(CallerBlockingRejectedExecutionHandler())
-            removeOnCancelPolicy = true
-        }
+    private val paymentExecutor = ThreadPoolExecutor(
+        parallelRequests,
+        parallelRequests,
+        0L, TimeUnit.MILLISECONDS,
+        LinkedBlockingQueue(parallelRequests * 2),
+        NamedThreadFactory("payment-submission-executor"),
+        rejectedCountingPolicy
+    ).apply {
+        allowCoreThreadTimeOut(false)
     }
+
+    private val okHttpExecutor = ThreadPoolExecutor(
+        parallelRequests,
+        parallelRequests,
+        0L, TimeUnit.MILLISECONDS,
+        LinkedBlockingQueue(parallelRequests * 2),
+        NamedThreadFactory("okhttp-dispatcher-executor"),
+        rejectedCountingPolicy
+    )
 
     // IF the request is not completed in 1.5 seconds, then we throw the IOException
     private val client = OkHttpClient.Builder()
         .readTimeout(Duration.ofMillis(1000L))
-        .dispatcher( Dispatcher(Executors.newFixedThreadPool(100)).apply {
+        .dispatcher( Dispatcher(okHttpExecutor).apply {
             maxRequests = parallelRequests
             maxRequestsPerHost = parallelRequests
         })
         .connectionPool(ConnectionPool(parallelRequests, 20, TimeUnit.SECONDS))
         .build()
+
+    init {
+        meterRegistry.gauge("payment.executor.queue.size", paymentExecutor.queue) { it.size.toDouble() }
+        meterRegistry.gauge("okhttp.dispatcher.queue.size", okHttpExecutor.queue) { it.size.toDouble() }
+    }
 
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
     private val semaphore = Semaphore(parallelRequests)
