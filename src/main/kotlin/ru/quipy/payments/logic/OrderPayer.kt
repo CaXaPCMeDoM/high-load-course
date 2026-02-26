@@ -34,17 +34,9 @@ class OrderPayer {
     @Autowired
     private lateinit var paymentService: PaymentService
 
-    @Autowired
-    private lateinit var meterRegistry: MeterRegistry
-
     private val queueSize = CORE_POOL_SIZE * QUEUE_SIZE_MULTIPLIER
 
-    private val rejectedTasksCounter: Counter = Counter.builder("order payer tasks rejected")
-        .description("Number of tasks rejected due to queue overflow")
-        .register(meterRegistry)
-
     private val rejectedCountingPolicy = RejectedExecutionHandler { r, executor ->
-        rejectedTasksCounter.increment()
         throw RejectedExecutionException("Task rejected from $executor")
     }
 
@@ -69,12 +61,6 @@ class OrderPayer {
     private val scheduledTasksSemaphore = Semaphore(MAX_SCHEDULED_TASKS)
 
     val rateLimiter = TokenBucketRateLimiter(4000, 5000, 1, TimeUnit.SECONDS)
-
-    init {
-        meterRegistry.gauge("order.immediate.queue.size", immediateExecutor.queue) { it.size.toDouble() }
-        meterRegistry.gauge("order.scheduled.queue.size", scheduledExecutor.queue) { it.size.toDouble() }
-        meterRegistry.gauge("order.scheduled.tasks.permits", scheduledTasksSemaphore) { it.availablePermits().toDouble() }
-    }
 
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         if (!rateLimiter.tick()) {
