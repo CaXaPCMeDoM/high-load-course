@@ -49,7 +49,7 @@ class OrderPayer {
     )
 
     private val scheduledExecutor = ScheduledThreadPoolExecutor(
-        100,
+        10,
         NamedThreadFactory("order-scheduled-executor")
     ).apply {
         removeOnCancelPolicy = true
