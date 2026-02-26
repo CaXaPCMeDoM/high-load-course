@@ -79,7 +79,7 @@ class PaymentExternalSystemAdapterImpl(
         .publishPercentileHistogram()
         .register(meterRegistry)
 
-    private val rejectedTasksCounter = Counter.builder("executor.tasks.rejected")
+    private val rejectedTasksCounter = Counter.builder("executor tasks rejected")
         .description("Number of tasks rejected due to queue overflow")
         .tag("account", properties.accountName)
         .register(meterRegistry)
