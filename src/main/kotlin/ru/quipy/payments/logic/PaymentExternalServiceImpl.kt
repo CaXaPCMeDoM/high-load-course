@@ -8,10 +8,7 @@ import io.micrometer.core.instrument.MeterRegistry
 import okhttp3.*
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.slf4j.LoggerFactory
-import ru.quipy.core.EventSourcingService
-import ru.quipy.payments.api.PaymentAggregate
 import java.io.IOException
-import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.CompletableFuture
@@ -20,7 +17,6 @@ import java.util.concurrent.TimeUnit
 
 class PaymentExternalSystemAdapterImpl(
     private val properties: PaymentAccountProperties,
-    private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
     private val paymentProviderHostPort: String,
     private val token: String,
     meterRegistry: MeterRegistry
@@ -85,15 +81,6 @@ class PaymentExternalSystemAdapterImpl(
         val transactionId = UUID.randomUUID()
         val future = CompletableFuture<Boolean>()
 
-        paymentESService.update(paymentId) {
-            it.logSubmission(
-                success = true,
-                transactionId = transactionId,
-                startedAt = now(),
-                spentInQueueDuration = Duration.ofMillis(now() - paymentStartedAt)
-            )
-        }
-
         val request = Request.Builder()
             .url(
                 "http://$paymentProviderHostPort/external/process" +
@@ -126,15 +113,6 @@ class PaymentExternalSystemAdapterImpl(
                             )
                         }
 
-                        paymentESService.update(paymentId) {
-                            it.logProcessing(
-                                body.result,
-                                now(),
-                                transactionId,
-                                reason = body.message
-                            )
-                        }
-
                         future.complete(body.result)
                     }
                 } catch (e: Exception) {
@@ -147,16 +125,6 @@ class PaymentExternalSystemAdapterImpl(
 
             override fun onFailure(call: Call, e: IOException) {
                 try {
-                    val reason = when (e) {
-                        is SocketTimeoutException -> "Socket timeout"
-                        is java.io.InterruptedIOException -> "Interrupted I/O"
-                        else -> e.message
-                    }
-
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = reason)
-                    }
-
                     future.complete(false)
                 } catch (ex: Exception) {
                     logger.error("[$accountName] Failure handling error for payment $paymentId", ex)
