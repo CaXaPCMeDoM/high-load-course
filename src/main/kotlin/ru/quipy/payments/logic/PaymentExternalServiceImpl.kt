@@ -33,7 +33,10 @@ import java.io.IOException
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.RejectedExecutionHandler
 import java.util.concurrent.ScheduledThreadPoolExecutor
+import java.util.concurrent.ThreadPoolExecutor
 
 
 // Advice: always treat time as a Duration
@@ -76,6 +79,18 @@ class PaymentExternalSystemAdapterImpl(
         .publishPercentileHistogram()
         .register(meterRegistry)
 
+    private val rejectedTasksCounter = Counter.builder("executor tasks rejected")
+        .description("Number of tasks rejected due to queue overflow")
+        .tag("account", properties.accountName)
+        .register(meterRegistry)
+
+    private val rejectedCountingPolicy = RejectedExecutionHandler { r, executor ->
+        rejectedTasksCounter.increment()
+        if (!executor.isShutdown) {
+            r.run()
+        }
+    }
+
     companion object {
         val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
 
@@ -90,27 +105,40 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
-    private val paymentExecutor = object : ScheduledThreadPoolExecutor(
-        5000,
-        NamedThreadFactory("payment-submission-executor")
-    ) {
-        init {
-            setMaximumPoolSize(5000)
-            setKeepAliveTime(0L, TimeUnit.MILLISECONDS)
-            setRejectedExecutionHandler(CallerBlockingRejectedExecutionHandler())
-            removeOnCancelPolicy = true
-        }
+    private val paymentExecutor = ThreadPoolExecutor(
+        parallelRequests,
+        parallelRequests,
+        0L, TimeUnit.MILLISECONDS,
+        LinkedBlockingQueue(parallelRequests * 2),
+        NamedThreadFactory("payment-submission-executor"),
+        rejectedCountingPolicy
+    ).apply {
+        allowCoreThreadTimeOut(false)
     }
+
+    private val okHttpExecutor = ThreadPoolExecutor(
+        parallelRequests,
+        parallelRequests,
+        0L, TimeUnit.MILLISECONDS,
+        LinkedBlockingQueue(parallelRequests * 2),
+        NamedThreadFactory("okhttp-dispatcher-executor"),
+        rejectedCountingPolicy
+    )
 
     // IF the request is not completed in 1.5 seconds, then we throw the IOException
     private val client = OkHttpClient.Builder()
-        .readTimeout(Duration.ofSeconds(30))
-        .dispatcher( Dispatcher(Executors.newFixedThreadPool(10000)).apply {
+        .readTimeout(Duration.ofMillis(1000L))
+        .dispatcher( Dispatcher(okHttpExecutor).apply {
             maxRequests = parallelRequests
             maxRequestsPerHost = parallelRequests
         })
         .connectionPool(ConnectionPool(parallelRequests, 20, TimeUnit.SECONDS))
         .build()
+
+    init {
+        meterRegistry.gauge("payment.executor.queue.size", paymentExecutor.queue) { it.size.toDouble() }
+        meterRegistry.gauge("okhttp.dispatcher.queue.size", okHttpExecutor.queue) { it.size.toDouble() }
+    }
 
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
     private val semaphore = Semaphore(parallelRequests)
@@ -135,9 +163,9 @@ class PaymentExternalSystemAdapterImpl(
         incomingRegCounted.increment()
 
         // Вне зависимости от исхода оплаты важно отметить что она была отправлена.
-        paymentESService.update(paymentId) {
-            it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
-        }
+        //paymentESService.update(paymentId) {
+        //    it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
+        //}
 
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
 
@@ -185,11 +213,11 @@ class PaymentExternalSystemAdapterImpl(
 
                             logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
 
-                            CoroutineScope(Dispatchers.IO).launch {
+                            /*CoroutineScope(Dispatchers.IO).launch {
                                 paymentESService.update(paymentId) {
                                     it.logProcessing(body.result, now(), transactionId, reason = body.message)
                                 }
-                            }
+                            }*/
 
                             val processingTime = now() - startTime
                             recordOutgoingRequest(processingTime)
@@ -211,23 +239,23 @@ class PaymentExternalSystemAdapterImpl(
                         when (e) {
                             is SocketTimeoutException -> {
                                 logger.error("[$accountName] Payment socket timeout for txId: $transactionId, payment: $paymentId", e)
-                                paymentESService.update(paymentId) {
+                                /*paymentESService.update(paymentId) {
                                     it.logProcessing(false, now(), transactionId, reason = "Socket timeout.")
-                                }
+                                }*/
                             }
 
                             is java.io.InterruptedIOException -> {
                                 logger.error("[$accountName] Payment interrupted (timeout/cancel) for txId: $transactionId, payment: $paymentId", e)
-                                paymentESService.update(paymentId) {
+                                /*paymentESService.update(paymentId) {
                                     it.logProcessing(false, now(), transactionId, reason = "Interrupted I/O (timeout or cancel).")
-                                }
+                                }*/
                             }
 
                             else -> {
                                 logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
-                                paymentESService.update(paymentId) {
+                                /*paymentESService.update(paymentId) {
                                     it.logProcessing(false, now(), transactionId, reason = e.message)
-                                }
+                                }*/
                             }
                         }
 
