@@ -135,9 +135,9 @@ class PaymentExternalSystemAdapterImpl(
         incomingRegCounted.increment()
 
         // Вне зависимости от исхода оплаты важно отметить что она была отправлена.
-        paymentESService.update(paymentId) {
+        /*paymentESService.update(paymentId) {
             it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
-        }
+        }*/
 
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
 
@@ -185,11 +185,11 @@ class PaymentExternalSystemAdapterImpl(
 
                             logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
 
-                            CoroutineScope(Dispatchers.IO).launch {
+                            /*CoroutineScope(Dispatchers.IO).launch {
                                 paymentESService.update(paymentId) {
                                     it.logProcessing(body.result, now(), transactionId, reason = body.message)
                                 }
-                            }
+                            }*/
 
                             val processingTime = now() - startTime
                             recordOutgoingRequest(processingTime)
@@ -211,23 +211,23 @@ class PaymentExternalSystemAdapterImpl(
                         when (e) {
                             is SocketTimeoutException -> {
                                 logger.error("[$accountName] Payment socket timeout for txId: $transactionId, payment: $paymentId", e)
-                                paymentESService.update(paymentId) {
+                                /*paymentESService.update(paymentId) {
                                     it.logProcessing(false, now(), transactionId, reason = "Socket timeout.")
-                                }
+                                }*/
                             }
 
                             is java.io.InterruptedIOException -> {
                                 logger.error("[$accountName] Payment interrupted (timeout/cancel) for txId: $transactionId, payment: $paymentId", e)
-                                paymentESService.update(paymentId) {
+                                /*paymentESService.update(paymentId) {
                                     it.logProcessing(false, now(), transactionId, reason = "Interrupted I/O (timeout or cancel).")
-                                }
+                                }*/
                             }
 
                             else -> {
                                 logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
-                                paymentESService.update(paymentId) {
+                                /*paymentESService.update(paymentId) {
                                     it.logProcessing(false, now(), transactionId, reason = e.message)
-                                }
+                                }*/
                             }
                         }
 
