@@ -15,6 +15,7 @@ import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 
 class PaymentExternalSystemAdapterImpl(
@@ -24,6 +25,7 @@ class PaymentExternalSystemAdapterImpl(
     private val token: String,
     meterRegistry: MeterRegistry
 ) : PaymentExternalSystemAdapter {
+
     companion object {
         val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
         val emptyBody = ByteArray(0).toRequestBody(null)
@@ -32,7 +34,8 @@ class PaymentExternalSystemAdapterImpl(
 
     private val serviceName = properties.serviceName
     private val accountName = properties.accountName
-    private val parallelRequests = 300
+    private val parallelRequests = properties.parallelRequests
+    private val inFlightLimiter = Semaphore(parallelRequests)
 
     private val incomingStarted = Counter.builder("incoming.started")
         .tag("account", accountName)
@@ -73,6 +76,12 @@ class PaymentExternalSystemAdapterImpl(
 
         incomingStarted.increment()
 
+        if (!inFlightLimiter.tryAcquire()) {
+            incomingFinished.increment()
+            logger.warn("[$accountName] Too many in-flight requests, rejecting payment $paymentId")
+            return CompletableFuture.completedFuture(false)
+        }
+
         val transactionId = UUID.randomUUID()
         val future = CompletableFuture<Boolean>()
 
@@ -102,14 +111,13 @@ class PaymentExternalSystemAdapterImpl(
         outgoingStarted.increment()
 
         client.newCall(request).enqueue(object : Callback {
-
             override fun onResponse(call: Call, response: Response) {
                 try {
                     response.use { resp ->
                         val body = try {
                             mapper.readValue(resp.body?.string(), ExternalSysResponse::class.java)
                         } catch (e: Exception) {
-                            logger.error("[$accountName] Invalid response for $paymentId", e)
+                            logger.error("[$accountName] Invalid response for payment $paymentId", e)
                             ExternalSysResponse(
                                 transactionId.toString(),
                                 paymentId.toString(),
@@ -130,7 +138,7 @@ class PaymentExternalSystemAdapterImpl(
                         future.complete(body.result)
                     }
                 } catch (e: Exception) {
-                    logger.error("[$accountName] Response processing error", e)
+                    logger.error("[$accountName] Error processing response for payment $paymentId", e)
                     future.complete(false)
                 } finally {
                     finish(startTime)
@@ -151,7 +159,7 @@ class PaymentExternalSystemAdapterImpl(
 
                     future.complete(false)
                 } catch (ex: Exception) {
-                    logger.error("[$accountName] Failure handling error", ex)
+                    logger.error("[$accountName] Failure handling error for payment $paymentId", ex)
                     future.complete(false)
                 } finally {
                     finish(startTime)
@@ -159,6 +167,7 @@ class PaymentExternalSystemAdapterImpl(
             }
 
             private fun finish(startTime: Long) {
+                inFlightLimiter.release()
                 outgoingFinished.increment()
                 incomingFinished.increment()
                 outgoingLatency.record((now() - startTime).toDouble())
