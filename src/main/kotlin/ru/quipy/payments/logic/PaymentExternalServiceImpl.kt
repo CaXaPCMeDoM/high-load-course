@@ -35,8 +35,11 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.RejectedExecutionHandler
+import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 
 // Advice: always treat time as a Duration
@@ -100,10 +103,16 @@ class PaymentExternalSystemAdapterImpl(
         const val MAX_RETRIES: Int = 3
     }
 
+
     private val serviceName = properties.serviceName
     private val accountName = properties.accountName
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
+
+    private val scheduler = Executors.newScheduledThreadPool(
+        1,
+        NamedThreadFactory("hedge-scheduler-${accountName}")
+    )
 
     private val paymentExecutor = ThreadPoolExecutor(
         parallelRequests,
@@ -128,7 +137,7 @@ class PaymentExternalSystemAdapterImpl(
     // IF the request is not completed in 1.5 seconds, then we throw the IOException
     private val client = OkHttpClient.Builder()
         .readTimeout(Duration.ofMillis(1000L))
-        .dispatcher( Dispatcher(okHttpExecutor).apply {
+        .dispatcher(Dispatcher(okHttpExecutor).apply {
             maxRequests = parallelRequests
             maxRequestsPerHost = parallelRequests
         })
@@ -159,47 +168,46 @@ class PaymentExternalSystemAdapterImpl(
 
         val transactionId = UUID.randomUUID()
         val future = CompletableFuture<Boolean>()
+        val completed = AtomicBoolean(false)
+        var scheduledFuture: ScheduledFuture<*>? = null
 
         incomingRegCounted.increment()
-
-        // Вне зависимости от исхода оплаты важно отметить что она была отправлена.
-        //paymentESService.update(paymentId) {
-        //    it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
-        //}
-
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
 
-        CompletableFuture.runAsync({
-            try {
-                performPaymentSingleAttempt(paymentId, amount, transactionId, future)
-            } catch (e: Exception) {
-                future.complete(false)
-                outgoingFinishedReqCounted.increment()
-                incomingFinishedReqCounted.increment()
-            }
-        }, paymentExecutor)
-
-        return future
-    }
-
-    private fun performPaymentSingleAttempt(
-        paymentId: UUID,
-        amount: Int,
-        transactionId: UUID,
-        future: CompletableFuture<Boolean>
-    ) {
         val startTime = now()
+        val timeRemaining = deadline - startTime
+        if (timeRemaining <= 0) {
+            future.complete(false)
+            incomingFinishedReqCounted.increment()
+            return future
+        }
 
-        outgoingReqCounted.increment()
-        semaphore.acquire()
-        rateLimiter.tickBlocking()
+        val attemptsLeft = AtomicInteger(1)
 
-        val request = Request.Builder().run {
-            url("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
-            post(emptyBody)
-        }.build()
+        fun sendAttempt() {
+            outgoingReqCounted.increment()
+            try {
+                semaphore.acquire()
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                if (completed.compareAndSet(false, true)) {
+                    future.complete(false)
+                    incomingFinishedReqCounted.increment()
+                }
+                outgoingFinishedReqCounted.increment()
+                return
+            }
+            rateLimiter.tickBlocking()
 
-        try {
+            val request = Request.Builder().run {
+                url(
+                    "http://$paymentProviderHostPort/external/process" +
+                            "?serviceName=$serviceName&token=$token&accountName=$accountName" +
+                            "&transactionId=$transactionId&paymentId=$paymentId&amount=$amount"
+                )
+                post(emptyBody)
+            }.build()
+
             client.newCall(request).enqueue(object : Callback {
                 override fun onResponse(call: Call, response: Response) {
                     try {
@@ -213,24 +221,38 @@ class PaymentExternalSystemAdapterImpl(
 
                             logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
 
-                            /*CoroutineScope(Dispatchers.IO).launch {
-                                paymentESService.update(paymentId) {
-                                    it.logProcessing(body.result, now(), transactionId, reason = body.message)
-                                }
-                            }*/
-
                             val processingTime = now() - startTime
                             recordOutgoingRequest(processingTime)
 
-                            future.complete(body.result)
+                            when {
+                                body.result -> {
+                                    if (completed.compareAndSet(false, true)) {
+                                        future.complete(true)
+                                        scheduledFuture?.cancel(false)
+                                        incomingFinishedReqCounted.increment()
+                                    }
+                                }
+
+                                else -> {
+                                    if (completed.compareAndSet(false, true)) {
+                                        future.complete(false)
+                                        scheduledFuture?.cancel(false)
+                                        incomingFinishedReqCounted.increment()
+                                    }
+                                }
+                            }
                         }
                     } catch (e: Exception) {
                         logger.error("[$accountName] Error processing response for payment $paymentId", e)
-                        future.complete(false)
+                        if (attemptsLeft.decrementAndGet() == 0) {
+                            if (completed.compareAndSet(false, true)) {
+                                future.complete(false)
+                                incomingFinishedReqCounted.increment()
+                            }
+                        }
                     } finally {
                         semaphore.release()
                         outgoingFinishedReqCounted.increment()
-                        incomingFinishedReqCounted.increment()
                     }
                 }
 
@@ -238,45 +260,65 @@ class PaymentExternalSystemAdapterImpl(
                     try {
                         when (e) {
                             is SocketTimeoutException -> {
-                                logger.error("[$accountName] Payment socket timeout for txId: $transactionId, payment: $paymentId", e)
-                                /*paymentESService.update(paymentId) {
-                                    it.logProcessing(false, now(), transactionId, reason = "Socket timeout.")
-                                }*/
+                                logger.error(
+                                    "[$accountName] Payment socket timeout for txId: $transactionId, payment: $paymentId",
+                                    e
+                                )
                             }
 
                             is java.io.InterruptedIOException -> {
-                                logger.error("[$accountName] Payment interrupted (timeout/cancel) for txId: $transactionId, payment: $paymentId", e)
-                                /*paymentESService.update(paymentId) {
-                                    it.logProcessing(false, now(), transactionId, reason = "Interrupted I/O (timeout or cancel).")
-                                }*/
+                                logger.error(
+                                    "[$accountName] Payment interrupted (timeout/cancel) for txId: $transactionId, payment: $paymentId",
+                                    e
+                                )
                             }
 
                             else -> {
-                                logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
-                                /*paymentESService.update(paymentId) {
-                                    it.logProcessing(false, now(), transactionId, reason = e.message)
-                                }*/
+                                logger.error(
+                                    "[$accountName] Payment failed for txId: $transactionId, payment: $paymentId",
+                                    e
+                                )
                             }
                         }
-
-                        future.complete(false)
+                        if (attemptsLeft.decrementAndGet() == 0) {
+                            if (completed.compareAndSet(false, true)) {
+                                future.complete(false)
+                                incomingFinishedReqCounted.increment()
+                            }
+                        }
                     } catch (ex: Exception) {
                         logger.error("[$accountName] Error in onFailure for payment $paymentId", ex)
-                        future.complete(false)
+                        if (attemptsLeft.decrementAndGet() == 0) {
+                            if (completed.compareAndSet(false, true)) {
+                                future.complete(false)
+                                incomingFinishedReqCounted.increment()
+                            }
+                        }
                     } finally {
                         semaphore.release()
                         outgoingFinishedReqCounted.increment()
-                        incomingFinishedReqCounted.increment()
                     }
                 }
             })
-        } catch (e: Exception) {
-            logger.error("[$accountName] Error preparing request for payment $paymentId", e)
-            future.complete(false)
-            semaphore.release()
-            outgoingFinishedReqCounted.increment()
-            incomingFinishedReqCounted.increment()
         }
+
+        sendAttempt()
+
+        val hedgeThresholdMs = 200L
+        val minTimeForHedge = hedgeThresholdMs + 500L
+
+        if (timeRemaining > minTimeForHedge) {
+            attemptsLeft.incrementAndGet()
+            scheduledFuture = scheduler.schedule({
+                if (!completed.get()) {
+                    logger.info("[$accountName] Sending hedged request for payment $paymentId, txId: $transactionId")
+                    retryCounter.increment()
+                    sendAttempt()
+                }
+            }, hedgeThresholdMs, TimeUnit.MILLISECONDS)
+        }
+
+        return future
     }
 
     override fun price() = properties.price
